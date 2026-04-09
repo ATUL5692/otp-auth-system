@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from app.db.deps import get_db
+from app.api.deps import get_db
 from app.services.otp_service import create_otp, verify_otp
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
