@@ -6,7 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from db import get_db
-from models import User
+from models import User, OTP
 
 router = APIRouter()
 
@@ -15,25 +15,50 @@ ALGORITHM = "HS256"
 
 security = HTTPBearer()
 
-otp_store = {}  # {phone: otp}
-
-
-# 🔥 Send OTP
+# Send OTP (store in DB)
 @router.post("/send-otp")
-def send_otp(phone_number: str):
+def send_otp(phone_number: str, db: Session = Depends(get_db)):
     otp = str(random.randint(1000, 9999))
-    otp_store[phone_number] = otp
+
+    otp_entry = OTP(
+        phone_number=phone_number,
+        otp_code=otp,
+        expires_at=datetime.utcnow() + timedelta(minutes=5),
+        is_used=False
+    )
+
+    db.add(otp_entry)
+    db.commit()
 
     return {"otp": otp}  # testing only
 
 
-# 🔥 Verify OTP
+# Verify OTP
 @router.post("/verify-otp")
 def verify_otp(phone_number: str, otp: str, db: Session = Depends(get_db)):
-    if phone_number not in otp_store or otp_store[phone_number] != otp:
+
+    # get latest unused OTP
+    otp_record = db.query(OTP).filter(
+        OTP.phone_number == phone_number,
+        OTP.is_used == False
+    ).order_by(OTP.id.desc()).first()
+
+    if not otp_record:
+        raise HTTPException(status_code=400, detail="OTP not found")
+
+    # Expiry check
+    if datetime.utcnow() > otp_record.expires_at:
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    # Match check
+    if otp_record.otp_code != otp:
         raise HTTPException(status_code=400, detail="Invalid OTP")
 
-    # check user
+    # Mark as used
+    otp_record.is_used = True
+    db.commit()
+
+    # User check/create
     user = db.query(User).filter(User.phone_number == phone_number).first()
 
     if not user:
@@ -42,7 +67,7 @@ def verify_otp(phone_number: str, otp: str, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(user)
 
-    # create token
+    # Generate token
     payload = {
         "sub": str(user.id),
         "exp": datetime.utcnow() + timedelta(minutes=60)
@@ -56,7 +81,7 @@ def verify_otp(phone_number: str, otp: str, db: Session = Depends(get_db)):
     }
 
 
-# 🔥 Get current user
+# Get current user
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
@@ -71,10 +96,13 @@ def get_current_user(
 
     user = db.query(User).filter(User.id == int(user_id)).first()
 
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
     return user
 
 
-# 🔥 Protected route
+# Protected route
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
     return {
